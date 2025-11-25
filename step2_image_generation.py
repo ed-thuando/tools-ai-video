@@ -14,6 +14,8 @@ from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
+DEFAULT_IMAGE_ASPECT_RATIO = os.getenv("GEMINI_IMAGE_ASPECT_RATIO", "9:16")
+
 
 class ImageGenerator:
     """Generates images for each scene in the story"""
@@ -21,6 +23,13 @@ class ImageGenerator:
     def __init__(self, api_key: str):
         self.client = genai.Client(api_key=api_key)
         self.image_model = "gemini-2.5-flash-image"
+        self.image_aspect_ratio = DEFAULT_IMAGE_ASPECT_RATIO
+        self.image_generation_config = types.GenerateContentConfig(
+            image_config=types.ImageConfig(
+                aspect_ratio=self.image_aspect_ratio,
+            )
+        )
+        logger.info("Image generator configured with aspect ratio: %s", self.image_aspect_ratio)
     
     def generate(self, scripts_data: List[Dict], output_dir: str) -> List[Dict]:
         """
@@ -41,7 +50,15 @@ class ImageGenerator:
         
         for i, script in enumerate(scripts_data, 1):
             try:
-                logger.info(f"Generating image {i}/{len(scripts_data)}: {script['from']:.2f}s - {script['to']:.2f}s")
+                start_sec = self._extract_seconds(script, "from")
+                end_sec = self._extract_seconds(script, "to")
+                duration_sec = self._extract_seconds(script, "duration")
+                duration_ms = int(round(duration_sec * 1000))
+                
+                logger.info(
+                    f"Generating image {i}/{len(scripts_data)}: {start_sec:.2f}s - {end_sec:.2f}s "
+                    f"(duration {duration_sec:.3f}s)"
+                )
                 
                 # Create enhanced prompt for image generation
                 prompt = self._create_image_prompt(
@@ -62,9 +79,13 @@ class ImageGenerator:
                 # Store metadata
                 image_data = {
                     "index": i,
-                    "from": script["from"],
-                    "to": script["to"],
-                    "duration": script["duration"],
+                    "from": script.get("from", start_sec * 1000),
+                    "to": script.get("to", end_sec * 1000),
+                    "duration": duration_sec,
+                    "duration_ms": duration_ms,
+                    "from_seconds": start_sec,
+                    "to_seconds": end_sec,
+                    "duration_seconds": duration_sec,
                     "scene_description": script["scene"],
                     "script": script["script"],
                     "image_path": image_path,
@@ -82,6 +103,36 @@ class ImageGenerator:
         
         logger.info(f"✓ Successfully generated {len(images_data)} images")
         return images_data
+    
+    def _extract_seconds(self, script: Dict, key: str) -> float:
+        """
+        Safely extract second-based values (supports ms-based input)
+        """
+        seconds_key = f"{key}_seconds"
+        if seconds_key in script:
+            return float(script[seconds_key])
+        
+        raw_value = script.get(key, 0.0)
+        return self._convert_to_seconds(raw_value)
+    
+    @staticmethod
+    def _convert_to_seconds(value) -> float:
+        """
+        Normalize milliseconds or seconds to seconds (float)
+        """
+        if value is None:
+            return 0.0
+        
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        
+        if numeric_value > 1000 and isinstance(value, (int, float)):
+            # Treat as milliseconds for large integer values
+            return numeric_value / 1000.0
+        
+        return numeric_value
     
     def _create_image_prompt(self, scene_description: str, index: int, total: int, previous_image: str = None) -> str:
         """
@@ -144,6 +195,7 @@ Generate the image now. Return ONLY the image, no text or explanation."""
                 response = self.client.models.generate_content(
                     model=self.image_model,
                     contents=[prompt],
+                    config=self.image_generation_config,
                 )
                 
                 if self._save_image_from_response(response, image_path):

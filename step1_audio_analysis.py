@@ -4,20 +4,25 @@ Converts MP3 audio to timestamped scripts and scene descriptions
 """
 
 import json
+import os
 import base64
-from typing import List, Dict
+from typing import List, Dict, Optional
 import google.generativeai as genai
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
 
+DEFAULT_AUDIO_MODEL = os.getenv("GEMINI_AUDIO_MODEL", "gemini-3-pro-preview")
+
+
 class AudioAnalyzer:
     """Analyzes audio and generates timestamped scripts with scene descriptions"""
     
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, model_name: Optional[str] = None):
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel("gemini-2.0-flash")
+        self.model_name = model_name or DEFAULT_AUDIO_MODEL
+        self.model = genai.GenerativeModel(self.model_name)
     
     def _encode_audio(self, audio_path: str) -> str:
         """Encode audio file to base64"""
@@ -32,6 +37,10 @@ class AudioAnalyzer:
         seconds = int(seconds_parts[0])
         milliseconds = int(seconds_parts[1]) if len(seconds_parts) > 1 else 0
         return minutes * 60 + seconds + milliseconds / 1000
+    
+    def _seconds_to_milliseconds(self, seconds_value: float) -> int:
+        """Convert seconds (float) to integer milliseconds"""
+        return int(round(seconds_value * 1000))
     
     def analyze(self, audio_path: str) -> List[Dict]:
         """
@@ -113,9 +122,11 @@ Return ONLY the JSON array, no other text.
             # Validate and normalize data
             scripts_data = self._validate_and_normalize(scripts_data)
             
-            logger.info(f"Successfully analyzed audio. Generated {len(scripts_data)} script segments")
+            logger.info(f"Successfully analyzed audio with model '{self.model_name}'. Generated {len(scripts_data)} script segments")
             for i, script in enumerate(scripts_data, 1):
-                logger.info(f"  Segment {i}: {script['from']:.2f}s - {script['to']:.2f}s")
+                start_sec = script.get("from_seconds", script["from"] / 1000)
+                end_sec = script.get("to_seconds", script["to"] / 1000)
+                logger.info(f"  Segment {i}: {start_sec:.2f}s - {end_sec:.2f}s")
             
             return scripts_data
             
@@ -155,12 +166,24 @@ Return ONLY the JSON array, no other text.
                 logger.warning(f"Item {i}: from time >= to time, swapping")
                 from_time, to_time = to_time, from_time
             
+            from_ms = self._seconds_to_milliseconds(float(from_time))
+            to_ms = self._seconds_to_milliseconds(float(to_time))
+            
+            if from_ms >= to_ms:
+                logger.warning(f"Item {i}: from time >= to time after conversion, adjusting end time by +10ms")
+                to_ms = from_ms + 10
+            
+            duration_ms = to_ms - from_ms
+            
             normalized.append({
                 "script": str(item["script"]),
-                "from": float(from_time),
-                "to": float(to_time),
                 "scene": str(item["scene"]),
-                "duration": float(to_time) - float(from_time)
+                "from": from_ms,
+                "to": to_ms,
+                "duration": duration_ms,
+                "from_seconds": from_ms / 1000.0,
+                "to_seconds": to_ms / 1000.0,
+                "duration_seconds": duration_ms / 1000.0
             })
         
         return normalized

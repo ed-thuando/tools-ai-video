@@ -106,7 +106,10 @@ Analyze audio and generate timestamped scripts.
 ```python
 scripts = analyzer.analyze("story.mp3")
 for script in scripts:
-    print(f"{script['from']:.2f}s - {script['to']:.2f}s: {script['script']}")
+    print(
+        f"{script['from_seconds']:.2f}s - {script['to_seconds']:.2f}s "
+        f"({script['duration']} ms): {script['script']}"
+    )
 ```
 
 **Output Structure:**
@@ -114,10 +117,13 @@ for script in scripts:
 [
     {
         "script": "Vietnamese dialogue",
-        "from": 0.0,           # Start time in seconds
-        "to": 3.23,            # End time in seconds
+        "from": 0,             # Start time in milliseconds
+        "to": 3230,            # End time in milliseconds
         "scene": "Scene description",
-        "duration": 3.23       # Duration in seconds
+        "duration": 3230,      # Duration in milliseconds (to - from)
+        "from_seconds": 0.0,
+        "to_seconds": 3.23,
+        "duration_seconds": 3.23
     },
     ...
 ]
@@ -175,9 +181,13 @@ for image in images:
 [
     {
         "index": 1,
-        "from": 0.0,
-        "to": 3.23,
+        "from": 0,
+        "to": 3230,
         "duration": 3.23,
+        "duration_ms": 3230,
+        "from_seconds": 0.0,
+        "to_seconds": 3.23,
+        "duration_seconds": 3.23,
         "scene_description": "Scene description",
         "script": "Vietnamese dialogue",
         "image_path": "/path/to/scene_001.png",

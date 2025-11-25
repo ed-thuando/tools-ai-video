@@ -222,10 +222,13 @@ projects/my_story/
 [
   {
     "script": "Vietnamese dialogue",
-    "from": 0.0,
-    "to": 3.23,
+    "from": 0,
+    "to": 3230,
     "scene": "Scene description",
-    "duration": 3.23
+    "duration": 3230,
+    "from_seconds": 0.0,
+    "to_seconds": 3.23,
+    "duration_seconds": 3.23
   }
 ]
 ```
@@ -235,9 +238,13 @@ projects/my_story/
 [
   {
     "index": 1,
-    "from": 0.0,
-    "to": 3.23,
+    "from": 0,
+    "to": 3230,
     "duration": 3.23,
+    "duration_ms": 3230,
+    "from_seconds": 0.0,
+    "to_seconds": 3.23,
+    "duration_seconds": 3.23,
     "scene_description": "Scene description",
     "script": "Vietnamese dialogue",
     "image_path": "/path/to/scene_001.png",

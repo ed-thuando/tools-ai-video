@@ -147,6 +147,7 @@ projects/
 ### Step 1: Audio Analysis
 
 - Uploads MP3 to Gemini API
+- Uses `gemini-3.0-pro` for richer transcription (set `GEMINI_AUDIO_MODEL` to override)
 - Extracts Vietnamese dialogue and narration
 - Generates scene descriptions
 - Creates timestamped script segments
@@ -157,10 +158,13 @@ projects/
 [
   {
     "script": "thủ đoạn thâm độc nhất để tiêu diệt 1 người là gì",
-    "from": 0.0,
-    "to": 3.23,
+    "from": 0,
+    "to": 3230,
     "scene": "2 người đàn ông mặc cổ trang đang cau mày, một người đàn ông đang thì thầm chuyện gì mờ ám vào tai người còn lại",
-    "duration": 3.23
+    "duration": 3230,
+    "from_seconds": 0.0,
+    "to_seconds": 3.23,
+    "duration_seconds": 3.23
   },
   ...
 ]

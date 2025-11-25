@@ -3,7 +3,7 @@
 # API Settings
 api:
   provider: "gemini"
-  model: "gemini-2.0-flash"
+  model: "gemini-3.0-pro-preview"
   timeout: 300  # seconds
 
 # Audio Settings
