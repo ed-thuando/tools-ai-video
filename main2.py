@@ -110,17 +110,19 @@ class AudioSplitter:
 class AudioToImageGenerator:
     """Generates images from audio partitions using Gemini 3 Flash"""
     
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, audio_model_name: Optional[str] = None):
         """
         Initialize audio-to-image generator
         
         Args:
             api_key: Gemini API key
+            audio_model_name: Optional override for Gemini audio model
         """
         genai.configure(api_key=api_key)
         self.client = genai_client.Client(api_key=api_key)
-        self.audio_model = "gemini-3-pro-preview"
+        self.audio_model_name = audio_model_name or os.getenv("GEMINI_AUDIO_MODEL", "gemini-2.5-flash")
         self.image_model = "gemini-2.5-flash-image"
+        self.audio_model = genai.GenerativeModel(self.audio_model_name)
         
         # Get image aspect ratio from config or env
         image_aspect_ratio = os.getenv("GEMINI_IMAGE_ASPECT_RATIO", "9:16")
@@ -129,7 +131,11 @@ class AudioToImageGenerator:
                 aspect_ratio=image_aspect_ratio,
             )
         )
-        logger.info(f"Audio-to-image generator initialized with aspect ratio: {image_aspect_ratio}")
+        logger.info(
+            "Audio-to-image generator initialized with aspect ratio %s using audio model %s",
+            image_aspect_ratio,
+            self.audio_model_name,
+        )
     
     def _encode_audio(self, audio_path: str) -> str:
         """Encode audio file to base64"""
@@ -179,8 +185,7 @@ Return ONLY the visual description text, no JSON, no formatting, just the descri
                 # Step 1: Analyze audio and get scene description
                 logger.debug(f"Analyzing audio with Gemini (attempt {attempt}/{retries})...")
                 
-                audio_model = genai.GenerativeModel(self.audio_model)
-                response = audio_model.generate_content([
+                response = self.audio_model.generate_content([
                     {
                         "mime_type": "audio/mpeg",
                         "data": audio_data,
@@ -346,7 +351,13 @@ Generate the image now. Return ONLY the image, no text or explanation."""
 class StoryVideoGeneratorV2:
     """Main orchestrator for the new story video generation pipeline"""
     
-    def __init__(self, project_name: str, api_key: str, partition_duration: float = 8.0):
+    def __init__(
+        self,
+        project_name: str,
+        api_key: str,
+        partition_duration: float = 8.0,
+        audio_model_name: Optional[str] = None,
+    ):
         """
         Initialize generator
         
@@ -354,20 +365,26 @@ class StoryVideoGeneratorV2:
             project_name: Name of the project
             api_key: Gemini API key
             partition_duration: Duration of each audio partition in seconds (default: 8.0)
+            audio_model_name: Optional override for the Gemini audio model
         """
         self.project_name = project_name
         self.api_key = api_key
         self.partition_duration = partition_duration
+        self.audio_model_name = audio_model_name
         self.config = Config(project_name)
         self.config.setup_directories()
         
         # Initialize components
         self.audio_splitter = AudioSplitter(partition_duration)
-        self.image_generator = AudioToImageGenerator(api_key)
+        self.image_generator = AudioToImageGenerator(api_key, audio_model_name=audio_model_name)
         self.video_creator = VideoCreator()
         
         logger.info(f"Initialized StoryVideoGeneratorV2 for project: {project_name}")
         logger.info(f"Partition duration: {partition_duration}s")
+        if self.audio_model_name:
+            logger.info("Using custom audio model: %s", self.audio_model_name)
+        else:
+            logger.info("Using default audio model from environment or fallback")
     
     def run(self, audio_path: str) -> str:
         """
@@ -475,6 +492,10 @@ Examples:
         help="Duration of each audio partition in seconds (default: 8.0)"
     )
     parser.add_argument(
+        "--audio-model",
+        help="Override Gemini audio model used for scene extraction (default: GEMINI_AUDIO_MODEL env or gemini-2.5-flash)"
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Enable verbose logging"
@@ -493,7 +514,8 @@ Examples:
         generator = StoryVideoGeneratorV2(
             args.project, 
             api_key, 
-            partition_duration=args.partition_duration
+            partition_duration=args.partition_duration,
+            audio_model_name=args.audio_model
         )
         video_path = generator.run(args.audio)
         print(f"\n✓ Success! Video saved to: {video_path}")
