@@ -1,0 +1,75 @@
+# Vietnamese Story Video Generator - Configuration
+
+# API Settings
+api:
+  provider: "gemini"
+  model: "gemini-2.0-flash"
+  timeout: 300  # seconds
+
+# Audio Settings
+audio:
+  format: "mp3"
+  sample_rate: 44100
+  channels: 2
+  quality: "high"
+
+# Image Settings
+image:
+  aspect_ratio: "9:16"  # Vertical for TikTok
+  width: 540
+  height: 960
+  format: "png"
+  quality: "high"
+  style: "cinematic"
+
+# Video Settings
+video:
+  codec: "libx264"
+  audio_codec: "aac"
+  fps: 30
+  bitrate: "5000k"
+  preset: "medium"  # ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow
+  pixel_format: "yuv420p"
+
+# Processing Settings
+processing:
+  max_concurrent_images: 3
+  retry_attempts: 3
+  retry_delay: 5  # seconds
+  timeout_per_image: 120  # seconds
+
+# Output Settings
+output:
+  format: "mp4"
+  container: "mp4"
+  create_metadata: true
+  create_logs: true
+  keep_intermediate_files: false
+
+# Scene Settings
+scene:
+  min_duration: 0.5  # seconds
+  max_duration: 30.0  # seconds
+  default_duration: 3.0  # seconds
+
+# Logging
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file_enabled: true
+  console_enabled: true
+
+# Performance
+performance:
+  use_gpu: false
+  max_workers: 4
+  memory_limit: null  # GB, null = unlimited
+
+# Features
+features:
+  auto_subtitle: false
+  add_music: false
+  add_effects: false
+  color_correction: false
+  scene_transitions: false
+
