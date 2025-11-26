@@ -122,7 +122,7 @@ class AudioToImageGenerator:
         """
         genai.configure(api_key=api_key)
         self.client = genai_client.Client(api_key=api_key)
-        self.audio_model_name = audio_model_name or os.getenv("GEMINI_AUDIO_MODEL", "gemini-2.5-flash")
+        self.audio_model_name = audio_model_name or os.getenv("GEMINI_AUDIO_MODEL", "gemini-2.0-flash-lite")
         self.image_model = "gemini-2.5-flash-image"
         self.audio_model = genai.GenerativeModel(self.audio_model_name)
         self.concept_prompt = concept_prompt
