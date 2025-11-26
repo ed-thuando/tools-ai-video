@@ -86,10 +86,37 @@ class VideoCreator:
         
         with open(concat_file, 'w') as f:
             for image in images_data:
-                duration = image['duration']
-                image_path = image['image_path']
-                
-                # Write concat format
+                # Normalize duration to **seconds** for FFmpeg concat demuxer.
+                # Some callers may store duration in milliseconds; here we detect
+                # large numeric values and convert them to seconds.
+                raw_duration = image.get("duration", 0)
+                try:
+                    duration = float(raw_duration)
+                except (TypeError, ValueError):
+                    logger.warning("Invalid duration %r for image %r, defaulting to 0.1s", raw_duration, image)
+                    duration = 0.1
+
+                # Heuristic: values greater than 1000 are likely milliseconds.
+                if duration > 1000:
+                    logger.debug(
+                        "Interpreting duration %.3f as milliseconds for image %r; converting to seconds",
+                        duration,
+                        image,
+                    )
+                    duration = duration / 1000.0
+
+                # Avoid zero/negative durations which can confuse FFmpeg
+                if duration <= 0:
+                    logger.warning(
+                        "Non‑positive duration %.3f for image %r, clamping to 0.1s",
+                        duration,
+                        image,
+                    )
+                    duration = 0.1
+
+                image_path = image["image_path"]
+
+                # Write concat format (duration is always in seconds)
                 f.write(f"file '{image_path}'\n")
                 f.write(f"duration {duration}\n")
         
