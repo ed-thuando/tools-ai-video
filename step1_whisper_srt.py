@@ -52,6 +52,7 @@ class WhisperSRTSceneAnalyzer:
         max_scene_duration_seconds: float = 8.0,
         language: Optional[str] = "vi",
         text_model_name: Optional[str] = None,
+        scene_prompt: Optional[str] = None,
     ):
         """
         Args:
@@ -61,11 +62,13 @@ class WhisperSRTSceneAnalyzer:
             max_scene_duration_seconds: Maximum duration of one scene in seconds
             language: Hint language code for Whisper (e.g. 'vi' for Vietnamese)
             text_model_name: Optional override for Gemini text model
+            scene_prompt: Optional user-provided prompt to guide scene generation
         """
         # LLM config
         genai.configure(api_key=api_key)
         self.text_model_name = text_model_name or DEFAULT_TEXT_MODEL
         self.text_model = genai.GenerativeModel(self.text_model_name)
+        self.scene_prompt = scene_prompt
 
         # Whisper config (lazy-loaded)
         self.whisper_model_name = whisper_model_name
@@ -105,10 +108,10 @@ class WhisperSRTSceneAnalyzer:
         self._save_raw_subtitles_json(subtitle_segments, self.raw_subtitles_json)
 
         # 3) Ask Gemini to group subtitles into visual scenes
-        scripts_data_raw = self._generate_scenes_with_llm(subtitle_segments)
+        raw_scene_groups = self._generate_scenes_with_llm(subtitle_segments)
 
-        # 4) Normalize to canonical `scripts_data` structure
-        scripts_data = self._validate_and_normalize(scripts_data_raw)
+        # 4) Process LLM output and heal timeline
+        scripts_data = self._process_and_heal_scenes(raw_scene_groups, subtitle_segments)
 
         logger.info("Generated %d scenes from Whisper+LLM", len(scripts_data))
         for i, script in enumerate(scripts_data, 1):
@@ -205,72 +208,64 @@ class WhisperSRTSceneAnalyzer:
 
     def _generate_scenes_with_llm(self, subtitles: List[SubtitleSegment]) -> List[Dict]:
         """
-        Ask Gemini to:
-        - Read the subtitle list
-        - Group related subtitles into visual scenes
-        - Ensure each scene is <= max_scene_duration_seconds (approx)
-        - Ensure from/to times stay within the original SRT timeline
-        - Output JSON array of scenes.
+        Ask Gemini to group subtitles into scenes and return the start/end indices.
         """
         max_scene_ms = int(self.max_scene_duration_seconds * 1000)
 
-        # Prepare a compact JSON payload for the model (more robust than raw SRT text)
         subtitle_payload = [
-            {
-                "index": s.index,
-                "start_ms": s.start_ms,
-                "end_ms": s.end_ms,
-                "text": s.text,
-            }
+            {"index": s.index, "start_ms": s.start_ms, "end_ms": s.end_ms, "text": s.text}
             for s in subtitles
         ]
 
+        scene_prompt_instructions = ""
+        if self.scene_prompt:
+            scene_prompt_instructions = f"""
+Định hướng sáng tạo:
+- Hãy tuân thủ định hướng sau cho TOÀN BỘ câu chuyện: "{self.scene_prompt}"
+- Các cảnh phải có sự liên kết về mặt hình ảnh và nội dung, tạo thành một câu chuyện thống nhất.
+"""
+
         prompt = f"""
-Bạn là một biên tập viên video chuyên nghiệp.
+Bạn là một biên tập viên video và một nghệ sĩ kể chuyện bằng hình ảnh.
 
 Nhiệm vụ:
-- Dựa trên danh sách phụ đề (thời gian tính bằng mili giây) bên dưới,
-  hãy chia câu chuyện thành các "cảnh" (scene) để tạo hình ảnh cho video dọc.
-- Mỗi cảnh có thể gộp nhiều câu/subtitle liên tiếp có nội dung liên quan.
-- Mỗi cảnh nên có độ dài tối đa khoảng {max_scene_ms} mili giây (<= {self.max_scene_duration_seconds:.1f} giây).
+- Dựa trên danh sách phụ đề JSON, hãy nhóm các phụ đề liên tiếp thành các "cảnh" (scenes).
+- Mỗi cảnh nên có độ dài tối đa khoảng {self.max_scene_duration_seconds:.1f} giây.
+- Các nhóm phụ đề phải liên tục và không chồng chéo (ví dụ: nhóm 1: index 1-3, nhóm 2: index 4-6).
 
-Yêu cầu về thời gian:
-- Mỗi cảnh phải dùng mốc thời gian phù hợp với phụ đề gốc:
-  - from: thời điểm bắt đầu cảnh (ms)
-  - to: thời điểm kết thúc cảnh (ms)
-- Các cảnh phải:
-  - Liên tục theo thời gian (không có khoảng trống lớn, không bị chồng lấn)
-  - from của cảnh đầu = start_ms của subtitle đầu tiên được dùng
-  - to của cảnh cuối = end_ms của subtitle cuối cùng được dùng
-- KHÔNG được tạo thời gian ngoài phạm vi các phụ đề gốc.
+{scene_prompt_instructions}
 
 Yêu cầu về nội dung cảnh:
-- Mỗi phần tử (cảnh) phải có format JSON như sau:
+- "script": Nối toàn bộ nội dung "text" của các phụ đề trong nhóm lại.
+- "scene": Dựa vào "script" và định hướng sáng tạo, mô tả chi tiết hình ảnh cho cảnh đó.
+
+Yêu cầu về định dạng ĐẦU RA:
+- Trả về DUY NHẤT một mảng JSON.
+- Mỗi phần tử trong mảng phải có định dạng sau:
   {{
-    "script": "toàn bộ lời thoại/giọng đọc trong cảnh, giữ nguyên tiếng Việt, ghép các câu liên quan",
-    "scene": "mô tả chi tiết hình ảnh cần hiển thị (bằng tiếng Việt, mô tả khung cảnh, nhân vật, trang phục, ánh sáng, cảm xúc...)",
-    "from": 0,
-    "to": 7500
+    "start_index": <chỉ số của phụ đề đầu tiên trong nhóm>,
+    "end_index": <chỉ số của phụ đề cuối cùng trong nhóm>,
+    "script": "<nội dung script đã nối>",
+    "scene": "<mô tả hình ảnh chi tiết>"
   }}
 
-- "script": hãy nối các câu phụ đề nằm trong cảnh đó (cùng thứ tự thời gian).
-- "scene": mô tả hình ảnh phải:
-  - Rõ ràng, cụ thể, giàu chi tiết hình ảnh
-  - Phù hợp với nội dung thoại
-  - Phù hợp với bối cảnh văn hóa Việt Nam nếu có
-
-ĐẦU RA:
-- Trả về DUY NHẤT một mảng JSON (JSON array) các cảnh, ví dụ:
+Ví dụ đầu ra:
 [
   {{
-    "script": "...",
-    "scene": "...",
-    "from": 0,
-    "to": 7500
+    "start_index": 1,
+    "end_index": 3,
+    "script": "Ngày xửa ngày xưa, ở một ngôi làng nhỏ, có một cậu bé tên là Tí.",
+    "scene": "Cận cảnh một cậu bé khoảng 10 tuổi, mặc áo bà ba nâu, đang ngồi trên lưng trâu thổi sáo. Xa xa là cánh đồng lúa chín vàng và những rặng tre xanh."
+  }},
+  {{
+    "start_index": 4,
+    "end_index": 5,
+    "script": "Tí rất thông minh và dũng cảm. Cậu không sợ bất cứ điều gì.",
+    "scene": "Tí đang đứng trước một hang động tối tăm, tay cầm một ngọn đuốc nhỏ, vẻ mặt kiên định và tò mò."
   }}
 ]
 
-KHÔNG thêm giải thích, KHÔNG thêm chữ nào ngoài JSON hợp lệ.
+QUAN TRỌNG: Chỉ trả về mảng JSON hợp lệ. KHÔNG thêm bất kỳ giải thích hay văn bản nào khác.
 """
 
         logger.info("Sending subtitles to Gemini text model to generate scenes...")
@@ -286,13 +281,10 @@ KHÔNG thêm giải thích, KHÔNG thêm chữ nào ngoài JSON hợp lệ.
         text = (response.text or "").strip()
         logger.debug("Raw LLM scene response (first 500 chars): %s", text[:500])
 
-        # Try to extract JSON block if model wraps with ```json ... ```
         if "```json" in text:
-            text = text.split("```json", 1)[1]
-            text = text.split("```", 1)[0].strip()
+            text = text.split("```json", 1)[1].split("```", 1)[0].strip()
         elif "```" in text:
-            text = text.split("```", 1)[1]
-            text = text.split("```", 1)[0].strip()
+            text = text.split("```", 1)[1].split("```", 1)[0].strip()
 
         try:
             data = json.loads(text)
@@ -306,80 +298,126 @@ KHÔNG thêm giải thích, KHÔNG thêm chữ nào ngoài JSON hợp lệ.
 
         return data
 
-    # ---------- Normalization ----------
+    # ---------- Normalization and Healing ----------
 
-    def _seconds_to_milliseconds(self, seconds_value: float) -> int:
-        """Convert seconds (float) to integer milliseconds"""
-        return int(round(seconds_value * 1000))
-
-    def _validate_and_normalize(self, scripts_data: List[Dict]) -> List[Dict]:
+    def _process_and_heal_scenes(
+        self,
+        raw_scenes: List[Dict],
+        subtitles: List[SubtitleSegment],
+    ) -> List[Dict]:
         """
-        Validate and normalize script data to the canonical structure used
-        by the rest of the pipeline.
-
-        Expected input fields (per item):
-        - script: str
-        - scene: str (visual description)
-        - from: number (ms or seconds)
-        - to: number (ms or seconds)
+        Process scene groups from LLM, calculate accurate timestamps, and heal the timeline.
         """
+        if not raw_scenes:
+            raise ValueError("LLM returned no scenes.")
+        if not subtitles:
+            raise ValueError("No subtitles available to process.")
+
         normalized: List[Dict] = []
+        subtitle_map = {s.index: s for s in subtitles}
+        max_subtitle_index = len(subtitles)
 
-        for i, item in enumerate(scripts_data):
-            if not all(key in item for key in ["script", "from", "to"]):
-                logger.warning("Skipping item %d: missing required fields", i)
+        for i, item in enumerate(raw_scenes):
+            if not all(key in item for key in ["start_index", "end_index", "script", "scene"]):
+                logger.warning("Skipping raw scene %d: missing required fields", i)
                 continue
-
-            # Scene description: can be under "scene" or "sence" (typo-tolerant)
-            scene_value = item.get("scene") or item.get("sence") or ""
-
-            # Convert times to float if they're strings
-            from_time = item["from"]
-            to_time = item["to"]
 
             try:
-                if isinstance(from_time, str):
-                    from_time = float(from_time.strip())
-                if isinstance(to_time, str):
-                    to_time = float(to_time.strip())
-            except Exception:
-                logger.warning("Item %d: invalid time values, skipping", i)
+                start_idx = int(item["start_index"])
+                end_idx = int(item["end_index"])
+            except (ValueError, TypeError):
+                logger.warning("Skipping raw scene %d: invalid start/end index", i)
                 continue
 
-            # Heuristic: if values are small (< 1e5), treat as seconds; otherwise as ms
-            # This keeps compatibility whether the LLM returns seconds or ms.
-            if abs(float(from_time)) < 1e5 and abs(float(to_time)) < 1e5:
-                from_ms = self._seconds_to_milliseconds(float(from_time))
-                to_ms = self._seconds_to_milliseconds(float(to_time))
-            else:
-                from_ms = int(round(float(from_time)))
-                to_ms = int(round(float(to_time)))
+            if not (1 <= start_idx <= end_idx <= max_subtitle_index):
+                logger.warning(
+                    "Skipping raw scene %d: index out of bounds (start=%d, end=%d, max=%d)",
+                    i, start_idx, end_idx, max_subtitle_index
+                )
+                continue
+
+            start_subtitle = subtitle_map.get(start_idx)
+            end_subtitle = subtitle_map.get(end_idx)
+
+            if not start_subtitle or not end_subtitle:
+                logger.warning("Skipping raw scene %d: subtitle index not found", i)
+                continue
+
+            from_ms = start_subtitle.start_ms
+            to_ms = end_subtitle.end_ms
 
             if from_ms >= to_ms:
-                logger.warning("Item %d: from_ms >= to_ms, adjusting end time by +10ms", i)
+                logger.warning("Scene %d: from_ms >= to_ms, adjusting end time by +10ms", i)
                 to_ms = from_ms + 10
 
             duration_ms = to_ms - from_ms
 
-            normalized.append(
-                {
-                    "script": str(item.get("script", "")),
-                    "scene": str(scene_value),
-                    "from": from_ms,
-                    "to": to_ms,
-                    "duration": duration_ms,
-                    "from_seconds": from_ms / 1000.0,
-                    "to_seconds": to_ms / 1000.0,
-                    "duration_seconds": duration_ms / 1000.0,
-                }
-            )
+            normalized.append({
+                "script": str(item.get("script", "")),
+                "scene": str(item.get("scene", "")),
+                "from": from_ms,
+                "to": to_ms,
+                "duration": duration_ms,
+                "from_seconds": from_ms / 1000.0,
+                "to_seconds": to_ms / 1000.0,
+                "duration_seconds": duration_ms / 1000.0,
+            })
 
         if not normalized:
-            raise ValueError("No valid scenes after normalization")
+            raise ValueError("No valid scenes after processing LLM output.")
 
-        # Sort by start time to enforce ordering
+        # Sort by start time to be safe
         normalized.sort(key=lambda x: x["from"])
-        return normalized
+
+        # --- Healing Phase ---
+        healed_scenes: List[Dict] = []
+        if not normalized:
+            return []
+
+        # Add the first scene as is
+        healed_scenes.append(normalized[0])
+
+        for i in range(1, len(normalized)):
+            prev_scene = healed_scenes[-1]
+            current_scene = normalized[i]
+
+            # If there's a gap, move the current scene's start time to the previous scene's end time
+            if current_scene["from"] > prev_scene["to"]:
+                gap = current_scene["from"] - prev_scene["to"]
+                logger.debug("Healing gap of %dms between scene %d and %d", gap, i, i + 1)
+                current_scene["from"] = prev_scene["to"]
+
+            # If there's an overlap, also move the start time
+            elif current_scene["from"] < prev_scene["to"]:
+                overlap = prev_scene["to"] - current_scene["from"]
+                logger.debug("Healing overlap of %dms between scene %d and %d", overlap, i, i + 1)
+                current_scene["from"] = prev_scene["to"]
+
+            # Ensure 'to' is after 'from'
+            if current_scene["to"] <= current_scene["from"]:
+                current_scene["to"] = current_scene["from"] + 10  # Min duration
+
+            # Recalculate durations
+            current_scene["from_seconds"] = current_scene["from"] / 1000.0
+            current_scene["to_seconds"] = current_scene["to"] / 1000.0
+            current_scene["duration"] = current_scene["to"] - current_scene["from"]
+            current_scene["duration_seconds"] = current_scene["duration"] / 1000.0
+
+            healed_scenes.append(current_scene)
+            
+        # Ensure the last scene ends at the same time as the last subtitle
+        last_subtitle_end_ms = subtitles[-1].end_ms
+        if healed_scenes and healed_scenes[-1]["to"] < last_subtitle_end_ms:
+            logger.debug("Extending last scene to match final subtitle end time.")
+            healed_scenes[-1]["to"] = last_subtitle_end_ms
+            # Recalculate final scene duration
+            final_scene = healed_scenes[-1]
+            final_scene["to_seconds"] = final_scene["to"] / 1000.0
+            final_scene["duration"] = final_scene["to"] - final_scene["from"]
+            final_scene["duration_seconds"] = final_scene["duration"] / 1000.0
+
+
+        return healed_scenes
 
 
 

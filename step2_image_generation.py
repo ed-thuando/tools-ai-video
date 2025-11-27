@@ -20,12 +20,10 @@ DEFAULT_IMAGE_ASPECT_RATIO = os.getenv("GEMINI_IMAGE_ASPECT_RATIO", "9:16")
 class ImageGenerator:
     """Generates images for each scene in the story"""
     
-    def __init__(self, api_key: str, short_prompt: bool = False, max_workers: int = 4):
+    def __init__(self, api_key: str, max_workers: int = 4):
         """
         Args:
             api_key: Gemini API key
-            short_prompt: If True, use a shorter, simpler prompt for image generation
-                          (similar in spirit to main3, relying mostly on the scene text).
             max_workers: Maximum number of concurrent image generation workers.
         """
         self.client = genai.Client(api_key=api_key)
@@ -36,19 +34,17 @@ class ImageGenerator:
                 aspect_ratio=self.image_aspect_ratio,
             )
         )
-        self.short_prompt = short_prompt
         # Bound concurrency so we don't hammer the API too hard
         self.max_workers = max_workers if max_workers > 0 else 1
         logger.info(
-            "Image generator configured with aspect ratio: %s (short_prompt=%s, max_workers=%d)",
+            "Image generator configured with aspect ratio: %s (max_workers=%d)",
             self.image_aspect_ratio,
-            self.short_prompt,
             self.max_workers,
         )
     
     def generate(self, scripts_data: List[Dict], output_dir: str) -> List[Dict]:
         """
-        Generate images for each scene
+        Generate images for each scene sequentially to ensure order.
         
         Args:
             scripts_data: List of script segments with scene descriptions
@@ -57,83 +53,71 @@ class ImageGenerator:
         Returns:
             List of image metadata with paths
         """
-        logger.info(f"Starting image generation for {len(scripts_data)} scenes")
+        logger.info(f"Starting sequential image generation for {len(scripts_data)} scenes")
         os.makedirs(output_dir, exist_ok=True)
         
         images_data: List[Dict] = []
 
-        # Import here to avoid importing in environments that don't need concurrency
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        def _generate_one(i: int, script: Dict) -> Dict:
-            """Worker function to generate a single image and its metadata."""
-            start_sec = self._extract_seconds(script, "from")
-            end_sec = self._extract_seconds(script, "to")
-            duration_sec = self._extract_seconds(script, "duration")
-            duration_ms = int(round(duration_sec * 1000))
-
-            logger.info(
-                "Generating image %d/%d: %.2fs - %.2fs (duration %.3fs)",
-                i,
-                len(scripts_data),
-                start_sec,
-                end_sec,
-                duration_sec,
-            )
-
-            prompt = self._create_image_prompt(
-                script["scene"],
-                i,
-                len(scripts_data),
-                previous_image=None,
-            )
-
-            image_path = self._generate_image(
-                prompt=prompt,
-                scene_description=script["scene"],
-                output_dir=output_dir,
-                index=i,
-            )
-
-            image_data = {
-                "index": i,
-                "from": script.get("from", start_sec * 1000),
-                "to": script.get("to", end_sec * 1000),
-                "duration": duration_sec,  # always store seconds here
-                "duration_ms": duration_ms,
-                "from_seconds": start_sec,
-                "to_seconds": end_sec,
-                "duration_seconds": duration_sec,
-                "scene_description": script["scene"],
-                "script": script["script"],
-                "image_path": image_path,
-                "image_filename": os.path.basename(image_path),
-            }
-
-            logger.info("✓ Image %d generated: %s", i, image_path)
-            return image_data
-
-        # Run image generation concurrently using a thread pool
-        logger.info("Running image generation with up to %d concurrent workers", self.max_workers)
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_index = {
-                executor.submit(_generate_one, i, script): i
-                for i, script in enumerate(scripts_data, 1)
-            }
-            for future in as_completed(future_to_index):
-                i = future_to_index[future]
-                try:
-                    image_data = future.result()
-                    images_data.append(image_data)
-                except Exception as e:
-                    logger.error("Error generating image %d: %s", i, str(e))
-                    raise
-
-        # Ensure deterministic order by scene index
-        images_data.sort(key=lambda x: x["index"])
+        for i, script in enumerate(scripts_data, 1):
+            try:
+                image_data = self._generate_one(i, script, output_dir, len(scripts_data))
+                images_data.append(image_data)
+            except Exception as e:
+                logger.error("Error generating image %d: %s", i, str(e), exc_info=True)
+                # Decide if you want to stop or continue
+                # For now, we stop the whole process on failure
+                raise
 
         logger.info("✓ Successfully generated %d images", len(images_data))
         return images_data
+
+    def _generate_one(self, i: int, script: Dict, output_dir: str, total_scenes: int) -> Dict:
+        """Worker function to generate a single image and its metadata."""
+        start_sec = self._extract_seconds(script, "from")
+        end_sec = self._extract_seconds(script, "to")
+        duration_sec = self._extract_seconds(script, "duration")
+        duration_ms = int(round(duration_sec * 1000))
+
+        logger.info(
+            "Generating image %d/%d: %.2fs - %.2fs (duration %.3fs)",
+            i,
+            total_scenes,
+            start_sec,
+            end_sec,
+            duration_sec,
+        )
+
+        prompt = self._create_image_prompt(
+            script["scene"],
+            i,
+            total_scenes,
+            previous_image=None,
+        )
+
+        image_path = self._generate_image(
+            prompt=prompt,
+            scene_description=script["scene"],
+            output_dir=output_dir,
+            index=i,
+        )
+
+        image_data = {
+            "index": i,
+            "from": script.get("from", start_sec * 1000),
+            "to": script.get("to", end_sec * 1000),
+            "duration": duration_sec,  # always store seconds here
+            "duration_ms": duration_ms,
+            "from_seconds": start_sec,
+            "to_seconds": end_sec,
+            "duration_seconds": duration_sec,
+            "scene_description": script["scene"],
+            "script": script["script"],
+            "image_path": str(Path(image_path).resolve()),
+            "image_filename": os.path.basename(image_path),
+        }
+
+        logger.info("✓ Image %d generated: %s", i, image_path)
+        return image_data
     
     def _extract_seconds(self, script: Dict, key: str) -> float:
         """
@@ -168,25 +152,7 @@ class ImageGenerator:
     def _create_image_prompt(self, scene_description: str, index: int, total: int, previous_image: str = None) -> str:
         """
         Create a prompt for image generation with Gemini.
-
-        If short_prompt is enabled, use a more compact instruction that relies
-        mainly on the scene description (similar in spirit to main3). Otherwise,
-        use the full cinematic template.
         """
-        if self.short_prompt:
-            base_prompt = f"""Create one vertical 9:16 cinematic image for this scene.
-
-Scene {index} of {total}:
-{scene_description}
-
-Requirements:
-- Vertical 9:16 format, suitable for TikTok.
-- Match the mood and content of the scene.
-- Professional, visually engaging, high‑quality result.
-
-Return ONLY the image, no text."""
-            return base_prompt
-
         base_prompt = f"""Create a professional, cinematic image for this Vietnamese story scene.
 
 Scene {index} of {total}:
